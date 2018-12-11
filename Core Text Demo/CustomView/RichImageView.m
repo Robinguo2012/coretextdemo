@@ -11,8 +11,13 @@
 #import "CTPageInfo.h"
 
 @interface RichImageView()
-
-@property (nonatomic,strong) CTPageInfo *pageInfo;
+{
+    CTFrameRef _frame;
+    long _length;
+    CGRect _imgRect;
+    NSMutableArray *_arrText;
+}
+//@property (nonatomic,strong) CTPageInfo *pageInfo;
 
 @end
 
@@ -21,7 +26,8 @@
 - (instancetype)init {
     if (self = [super init]) {
         self.backgroundColor = [UIColor yellowColor];
-        _pageInfo = [CTPageInfo new];
+//        _pageInfo = [CTPageInfo new];
+        _arrText = @[].mutableCopy;
     }
     return self;
 }
@@ -36,7 +42,7 @@
         2> 根据glyph 获取字符的frame, 通过比对point 是否在frame 中确定是否点击该字符.
      */
     UITouch *touch = [touches anyObject];
-    CGPoint point = [self convertPointToiOS:[touch locationInView:self]];
+    CGPoint point = [touch locationInView:self];
     if ([self isInImgFrame:point]) {
         return;
     }
@@ -48,60 +54,87 @@
     return CGPointMake(point.x, self.bounds.size.height - point.y);
 }
 
+- (CGRect)convertRect:(CGRect)rect {
+    return CGRectMake(rect.origin.x, self.bounds.size.height - rect.origin.y - rect.size.height, rect.size.width, rect.size.height);
+}
+
 - (BOOL)isInImgFrame:(CGPoint)point {
-    for (NSValue *rectValue in self.pageInfo.imgsInfo) {
-        CGRect imgRect = [rectValue CGRectValue];
-        if (CGRectContainsPoint(imgRect, point)) {
-            NSLog(@"点击了图片");
-            return YES;
-        }
+//    for (NSValue *rectValue in self.pageInfo.imgsInfo) {
+//        CGRect imgRect = [rectValue CGRectValue];
+//
+//    }
+    CGRect textRectFromScreen = [self convertRect:_imgRect];
+    if (CGRectContainsPoint(textRectFromScreen, point)) {
+        NSLog(@"点击了图片");
+        return YES;
     }
+    
     return NO;
 }
 
 - (void)clickInText:(CGPoint)point {
-    NSArray *allLines = (NSArray *)CTFrameGetLines(self.pageInfo.frame);
-    CGPoint origins[allLines.count];
-    CFRange ranges[allLines.count];
+    
     /**
-     CoreText 中获取所有(如这里获取点或获取字符文本)时,一般是(0,0)
+     这里用有事件的CTRun 的方法来执行字符的点击事件
+     更主流的做法是通过
+     ```
+     CFIndex CTLineGetStringIndexForPosition(CTLineRef, CGPoint);
+     ```
+     但是这有一个问题, 实际响应区域比预期的响应区域左偏移大概半个字.
+
      */
-    CTFrameGetLineOrigins(self.pageInfo.frame, CFRangeMake(0, 0), origins);
     
-    for (int i=0; i<allLines.count; i++) {
-        CTLineRef line = (__bridge CTLineRef)allLines[i];
-        ranges[i] = CTLineGetStringRange(line);
-    }
-    
-    for (int j=0; j<self.pageInfo.length; j++) {
-        long maxLoc;
-        int lineNum;
-        for (int k=0; k<allLines.count; k++) {
-            CFRange range = ranges[k];
-            maxLoc = range.location + range.length - 1;
-            if (j<=maxLoc) {
-                lineNum = j;
-                break;
-            }
+    [_arrText enumerateObjectsUsingBlock:^(NSValue  *_Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+        CGRect rect = [obj CGRectValue];
+        CGRect textRectFromScreen = [self convertRect:rect];
+        if (CGRectContainsPoint(textRectFromScreen, point)) {
+            [self click];
+            *stop = YES;
         }
-        
-        CTLineRef line = (__bridge CTLineRef)allLines[j];
-        CGPoint point = origins[j];
-    }
+    }];
     
+//    NSLog(@"你没有点击到文字");
 }
 
-- (CGRect)frameFromLine:(CTLineRef)line atIndex:(CFIndex)index point:(CGPoint)point {
+- (CGRect)frameFromLine:(CTLineRef)line atIndex:(CFIndex)index point:(CGPoint)origin {
     CGFloat offsetX = CTLineGetOffsetForStringIndex(line, index, NULL); // 获取字符相对于line 原点的偏移量
     CGFloat offsetX1 = CTLineGetOffsetForStringIndex(line, index + 1, NULL); // 获取下一个字符的偏移量,注意: 当index 大于当前line 的最后一个字符是 offsetX = offsetX + 字符宽;
+    offsetX += origin.x;
+    offsetX1 += origin.x;
+    CGFloat offsetY = origin.y; // 获取line的起点Y
+    CGFloat lineAscent;
+    CGFloat lineDescent;
+    CTRunRef currentRun;
+    NSArray *allRuns = (NSArray *)CTLineGetGlyphRuns(line);
+    for (int i=0; i<allRuns.count; i++) {
+        CTRunRef run = (__bridge CTRunRef)allRuns[i];
+        CFRange range = CTRunGetStringRange(run);
+        NSRange rangeOC = NSMakeRange(range.location, range.length);
+        if ([self isIndex:index inRange:rangeOC]) {
+            currentRun = run;
+            break;
+        }
+    }
     
-    
+    CTRunGetTypographicBounds(currentRun, CFRangeMake(0, 0), &lineAscent, &lineDescent, NULL);
+    offsetY -= lineDescent;
+    CGFloat height = lineDescent + lineAscent;
+    return CGRectMake(offsetX, offsetY, offsetX1 - offsetX, height);
+}
+
+- (BOOL)isIndex:(NSInteger)index inRange:(NSRange)range {
+    if (index >= range.location && index < range.location + range.length - 1) {
+        return YES;
+    }
+    return NO;
 }
 
 // Only override drawRect: if you perform custom drawing.
 // An empty implementation adversely affects performance during animation.
 - (void)drawRect:(CGRect)rect {
     // Drawing code
+    [super drawRect:rect];
+    
     CGContextRef context = UIGraphicsGetCurrentContext();
     
     // Flip context coordinates, only in iOS
@@ -115,10 +148,9 @@
      图文混排
      首先根据根据attributeString 生成一个frameSetter对象,然后通过设置一个图片的占位符.设置CTRunDelegate 设置图片信息的回调,计算图片的frame
      */
-    NSString *text = @"首先根据attributeString 生成一个frameSetter对象设置CTRunDelegate 设置图片信息的回调,计算图片的frame";
+    NSString *text = @"首先根据 @attributeString  生成一个frameSetter对象设置CTRunDelegate 设置图片信息的回调,计算图片的frame";
     
     NSMutableAttributedString *attributeString = [[NSMutableAttributedString alloc] initWithString:text];
-    
     CTRunDelegateCallbacks callBacks;
     memset(&callBacks, 0, sizeof(CTRunDelegateCallbacks));
     callBacks.version = kCTRunDelegateVersion1;
@@ -138,30 +170,34 @@
     
     [attributeString insertAttributedString:aPlaceHolder atIndex:40];
     
+    [attributeString addAttribute:NSForegroundColorAttributeName value:[UIColor greenColor] range:NSMakeRange(0, attributeString.length)];
+    
+    NSDictionary *activeAttr = @{NSForegroundColorAttributeName:[UIColor redColor],@"click":NSStringFromSelector(@selector(click))};
+    [attributeString addAttributes:activeAttr range:NSMakeRange(4, 15)];
+    
     CTFramesetterRef frameSetter = CTFramesetterCreateWithAttributedString((CFAttributedStringRef)attributeString);
 
     CGMutablePathRef path = CGPathCreateMutable();
     CGPathAddRect(path, NULL, self.bounds);
 
-    CTFrameRef frame = CTFramesetterCreateFrame(frameSetter, CFRangeMake(0, attributeString.length), path, NULL);
-    self.pageInfo.frame = frame;
+    _frame = CTFramesetterCreateFrame(frameSetter, CFRangeMake(0, attributeString.length), path, NULL);
+//    self.pageInfo.frame = frame;
     
-    CTFrameDraw(frame, context);
+    CTFrameDraw(_frame, context);
     
     UIImage *image = [UIImage imageNamed:@"zombie2.jpg"];
-    CGRect imgFrame = [self frameForImageWithFrame:frame context:context];
-    CGContextDrawImage(context, imgFrame, image.CGImage);
+    [self handleActiveAttributedString:_frame context:context];
     
-    NSValue *imgR = [NSValue valueWithCGRect:imgFrame];
-    [self.pageInfo.imgsInfo addObject:imgR];
+    CGContextDrawImage(context, _imgRect, image.CGImage);
+
     
     // 释放CoreText 对象
-    CFRelease(frame);
+    CFRelease(_frame);
     CFRelease(path);
     CFRelease(frameSetter);
 }
 
-- (CGRect)frameForImageWithFrame:(CTFrameRef)frame context:(CGContextRef)context {
+- (void)handleActiveAttributedString:(CTFrameRef)frame context:(CGContextRef)context {
     NSArray *allLines = (NSArray *)CTFrameGetLines(frame);
     NSInteger count = [allLines count];
     CGPoint points[count];
@@ -169,13 +205,19 @@
     
     for (int i = 0; i<count; i++) {
         CTLineRef line = (__bridge CTLineRef)allLines[i];
-        NSArray *allRuns = (NSArray *)CTLineGetGlyphRuns(line);
+        NSArray *allGlyphRuns = (NSArray *)CTLineGetGlyphRuns(line);
         
-        for (int j=0; j<allRuns.count; j++) {
-            CTRunRef run = (__bridge CTRunRef)allRuns[j];
+        for (int j=0; j<allGlyphRuns.count; j++) {
+            CTRunRef run = (__bridge CTRunRef)allGlyphRuns[j];
             NSDictionary *dic = (NSDictionary *)CTRunGetAttributes(run);
             CTRunDelegateRef delegate = (__bridge CTRunDelegateRef)[dic valueForKey:(NSString *)kCTRunDelegateAttributeName];
+            NSDictionary *attributes = (NSDictionary *)CTRunGetAttributes(run);
+            
             if (!delegate) {
+                if (attributes[@"click"]) {
+                    CGRect runRect = [self rectFromFrame:frame Line:line run:run origin:points[i]];
+                    [_arrText addObject:[NSValue valueWithCGRect:runRect]];
+                }
                 continue;
             }
             NSDictionary *refCon = (NSDictionary *)CTRunDelegateGetRefCon(delegate);
@@ -196,11 +238,25 @@
             CGPathRef path = CTFrameGetPath(frame);
             CGRect colRect = CGPathGetPathBoundingBox(path);
             CGRect imageBounds = CGRectOffset(boundsRun, colRect.origin.x, colRect.origin.y);
-            return imageBounds;
+            _imgRect = imageBounds;
         }
     }
-    
-    return CGRectZero;
+}
+
+- (CGRect)rectFromFrame:(CTFrameRef)frame Line:(CTLineRef)line run:(CTRunRef)run origin:(CGPoint)origin {
+    CGFloat descent;
+    CGFloat ascent;
+    CGRect boundsRect;
+    boundsRect.size.width = CTRunGetTypographicBounds(run, CFRangeMake(0, 0), &ascent, &descent, NULL);
+    boundsRect.size.height = descent + ascent;
+    CGFloat offsetX = CTLineGetOffsetForStringIndex(line, CTRunGetStringRange(run).location, NULL);// 获取X的偏移量
+    boundsRect.origin.x = origin.x + offsetX;
+    // 获取boundsRect.origin.y
+    boundsRect.origin.y = origin.y - descent;
+    CGPathRef path = CTFrameGetPath(frame); // 获取绘制区域
+    CGRect colRect = CGPathGetBoundingBox(path); // 获取裁剪区域边框
+    CGRect deleteRect = CGRectOffset(boundsRect, colRect.origin.x, colRect.origin.y);
+    return deleteRect;
 }
 
 
@@ -219,5 +275,8 @@ static CGFloat getWidth(void *refCon) {
     return [[dic objectForKey:@"width"] floatValue];
 }
 
+- (void)click {
+    NSLog(@"click text");
+}
 
 @end

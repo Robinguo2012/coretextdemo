@@ -6,7 +6,8 @@ target 'Core Text Demo' do
   # use_frameworks!
 
   pod 'HandyFrame'
-
+  pod 'TTTAttributedLabel'
+  
   # Pods for Core Text Demo
 
 end
